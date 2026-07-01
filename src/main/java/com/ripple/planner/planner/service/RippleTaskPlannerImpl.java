@@ -67,7 +67,7 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
      * 安全保护机制，防止因代码缺陷或异常数据导致无限循环。
      * </p>
      */
-    private static final int MAX_PLANNING_ITERATIONS = 20;
+    private static final int MAX_PLANNING_ITERATIONS = 10;
 
     // ==================== 依赖注入 ====================
 

@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * 网格服务实现类。
@@ -137,20 +138,12 @@ public class GridServiceImpl implements GridService {
             return Collections.emptyList();
         }
 
-        List<Grid> intersectingGrids = new ArrayList<>();
-
-        for (Grid grid : globalGrids) {
-            if (grid == null || grid.getGeometry() == null) {
-                continue;
-            }
-
-            // 使用 intersects 进行快速空间筛选（比 intersection 计算量更小）
-            if (grid.getGeometry().intersects(rippleGeometry)) {
-                // 创建新的 Grid 对象，避免修改全局缓存中的 probability
-                Grid copy = new Grid(grid.getId(), grid.getGeometry(), 0.0);
-                intersectingGrids.add(copy);
-            }
-        }
+        // 使用并行流加速 intersects 判断（JTS Geometry 只读操作线程安全）
+        List<Grid> intersectingGrids = globalGrids.parallelStream()
+                .filter(grid -> grid != null && grid.getGeometry() != null)
+                .filter(grid -> grid.getGeometry().intersects(rippleGeometry))
+                .map(grid -> new Grid(grid.getId(), grid.getGeometry(), 0.0))
+                .collect(Collectors.toList());
 
         log.debug("Ripple 区域相交网格数：{}/{}" , intersectingGrids.size(), globalGrids.size());
         return intersectingGrids;

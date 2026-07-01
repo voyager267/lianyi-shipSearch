@@ -267,30 +267,22 @@ public class GeometryServiceImpl implements GeometryService {
             return JtsGeometryUtil.createEmptyPolygon(geometryFactory);
         }
         try {
-            // 第一层：直接相交计算（大多数情况可正常工作）
-            return g1.intersection(g2);
+            // 第一层：先修复拓扑，再计算相交
+            Geometry fixedG1 = GeometryFixer.fix(g1);
+            Geometry fixedG2 = GeometryFixer.fix(g2);
+            return fixedG1.intersection(fixedG2);
         } catch (TopologyException e) {
-            // JTS 在处理复杂或自相交多边形时可能抛出 TopologyException
-            // 常见原因是坐标精度过高导致线段在非节点处相交（found non-noded intersection）
-            log.warn("几何相交计算发生拓扑异常，尝试用 GeometryFixer 修复后重试。error={}", e.getMessage());
+            log.warn("GeometryFixer 修复后仍发生拓扑异常，尝试用 GeometryPrecisionReducer 截断精度后重试。error={}", e.getMessage());
             try {
-                // 第二层：GeometryFixer 拓扑修复后重试
-                Geometry fixedG1 = GeometryFixer.fix(g1);
-                Geometry fixedG2 = GeometryFixer.fix(g2);
-                return fixedG1.intersection(fixedG2);
+                // 第二层：截断坐标精度后重试（保留 7 位小数，约 1 厘米级精度）
+                PrecisionModel pm = new PrecisionModel(1e7);
+                GeometryPrecisionReducer reducer = new GeometryPrecisionReducer(pm);
+                Geometry reducedG1 = reducer.reduce(g1);
+                Geometry reducedG2 = reducer.reduce(g2);
+                return reducedG1.intersection(reducedG2);
             } catch (TopologyException e2) {
-                log.warn("GeometryFixer 修复后仍发生拓扑异常，尝试用 GeometryPrecisionReducer 截断精度后重试。error={}", e2.getMessage());
-                try {
-                    // 第三层：截断坐标精度后重试（保留 7 位小数，约 1 厘米级精度）
-                    PrecisionModel pm = new PrecisionModel(1e7);
-                    GeometryPrecisionReducer reducer = new GeometryPrecisionReducer(pm);
-                    Geometry reducedG1 = reducer.reduce(g1);
-                    Geometry reducedG2 = reducer.reduce(g2);
-                    return reducedG1.intersection(reducedG2);
-                } catch (TopologyException e3) {
-                    log.error("精度截断后仍无法计算相交，返回空几何。error={}", e3.getMessage());
-                    return JtsGeometryUtil.createEmptyPolygon(geometryFactory);
-                }
+                log.error("精度截断后仍无法计算相交，返回空几何。error={}", e2.getMessage());
+                return JtsGeometryUtil.createEmptyPolygon(geometryFactory);
             }
         }
     }

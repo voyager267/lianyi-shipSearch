@@ -85,13 +85,11 @@ public class ProbabilityServiceImpl implements ProbabilityService {
             return;
         }
 
-        double maxProbability = 0.0;
-        double totalProbability = 0.0;
-
-        for (Grid grid : gridList) {
+        // 使用并行流加速概率计算（每个 Grid 独立计算，无共享可变状态）
+        gridList.parallelStream().forEach(grid -> {
             if (grid == null || JtsGeometryUtil.isEmptyOrInvalid(grid.getGeometry())) {
                 grid.setProbability(0.0);
-                continue;
+                return;
             }
 
             // 计算 Grid 与 Ripple 的相交区域
@@ -110,7 +108,13 @@ public class ProbabilityServiceImpl implements ProbabilityService {
             }
 
             grid.setProbability(probability);
+        });
 
+        // 顺序遍历收集统计信息（避免并行累加的精度/竞态问题）
+        double maxProbability = 0.0;
+        double totalProbability = 0.0;
+        for (Grid grid : gridList) {
+            double probability = grid.getProbability();
             totalProbability += probability;
             if (probability > maxProbability) {
                 maxProbability = probability;
