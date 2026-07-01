@@ -1,5 +1,8 @@
 package com.ripple.planner.config;
 
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.ripple.planner.jackson.GeometryJsonSerializer;
+import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.PrecisionModel;
 import org.springframework.context.annotation.Bean;
@@ -42,6 +45,23 @@ public class JtsConfig {
         // 这对于经纬度坐标足够精确，同时减少几何运算中的浮点误差
         PrecisionModel precisionModel = new PrecisionModel(PrecisionModel.FIXED);
         return new GeometryFactory(precisionModel);
+    }
+
+    /**
+     * 注册 JTS Geometry 的 Jackson 序列化模块。
+     * <p>
+     * Spring Boot 会自动检测所有 {@link com.fasterxml.jackson.databind.Module} 类型的 Bean，
+     * 并将其注册到 ObjectMapper 中。本模块将 JTS Geometry 对象序列化为标准 GeoJSON 格式，
+     * 解决默认 Jackson 序列化输出大量内部属性（如 envelopeInternal、factory、SRID 等）的问题。
+     * </p>
+     *
+     * @return 配置好的 Jackson SimpleModule 实例
+     */
+    @Bean
+    public SimpleModule jtsGeometryModule() {
+        SimpleModule module = new SimpleModule("JtsGeometryModule");
+        module.addSerializer(Geometry.class, new GeometryJsonSerializer());
+        return module;
     }
 
 }

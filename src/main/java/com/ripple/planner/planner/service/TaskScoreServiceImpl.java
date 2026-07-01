@@ -1,6 +1,7 @@
 package com.ripple.planner.planner.service;
 
-import com.ripple.planner.planner.model.TaskCandidate;
+import com.ripple.planner.planner.model.AccessTask;
+import com.ripple.planner.planner.model.Grid;
 import com.ripple.planner.planner.util.JtsGeometryUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -8,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -17,24 +19,19 @@ import java.util.List;
  *     Score = Probability × EffectiveCoverageArea × TimeWeight
  * </p>
  * <p>
- * 实现要点：
- * 1. Probability 直接从 candidate.getGrid().getProbability() 获取。
- *    ProbabilityService 必须在此方法调用之前完成计算。
- * 2. EffectiveCoverageArea 从 candidate.getCoverage().getArea() 获取。
- *    AccessService 在创建 TaskCandidate 时已计算 coverage。
- * 3. TimeWeight 基于当前时间与任务访问时间的差值（等待时间）计算。
- *    公式：timeWeight = 1.0 / (1.0 + waitSeconds)
- *    等待时间越短，TimeWeight 越接近 1；等待时间越长，TimeWeight 趋近于 0。
- * 4. 如果任一因子为 0（如 probability=0 或 coverageArea=0），最终 score 为 0。
- * 5. 如果任务不可达（ReachabilityService 返回 false），score 设为 0。
+ * 与旧版的适配说明：
+ * 1. 输入从 TaskCandidate 改为 AccessTask。
+ * 2. Probability 从 AccessTask.grids 中各 Grid 的 probability 计算得出（取平均值）。
+ * 3. EffectiveCoverageArea 从 AccessTask.coverage 获取。
+ * 4. TimeWeight 基于 AccessTask.accessTime 和 currentTime 计算。
+ * 5. 评分框架本身未变，保持 Probability × Area × Time 的结构。
  * </p>
  * <p>
- * 设计说明：
- * 1. 使用 double 进行浮点计算，注意精度问题。对于大面积区域，area 可能很大，
- *    score 可能超出 double 的精确表示范围，但卫星搜索任务的 area 通常在可接受范围内。
- * 2. score 不强制归一化到 [0, 1]，允许大于 1，因为 EffectiveCoverageArea 可能很大。
- *    RippleTaskPlanner 只关心 score 的相对大小，不关心绝对值。
- * 3. 所有因子都是非负的，因此 score 也是非负的。
+ * 实现要点：
+ * 1. 使用 GeometryService 进行相交计算和面积计算（当前版本 coverage 已由 AccessService 计算好，直接使用 getArea）。
+ * 2. 批量处理访问任务列表，逐个计算评分。
+ * 3. 对边界情况进行防御性处理：coverage 为空、grids 为空、probability 为 0 时返回 0。
+ * 4. 计算结果通过返回值传递，不修改 AccessTask 对象本身。
  * </p>
  */
 @Slf4j
@@ -51,71 +48,83 @@ public class TaskScoreServiceImpl implements TaskScoreService {
     private final ReachabilityService reachabilityService;
 
     /**
-     * 为单个候选任务计算评分。
+     * 为单个访问任务计算评分。
      * <p>
      * 实现步骤：
-     * 1. 参数校验：如果 candidate 为 null 或 grid/coverage 为空，score 设为 0 并返回。
+     * 1. 参数校验：如果 accessTask 为 null 或 coverage/grids 为空，返回 0。
      * 2. 判断可达性：调用 reachabilityService.isReachable()。
-     *    如果不可达，score = 0，直接返回。
-     * 3. 提取 Probability：probability = grid.getProbability()。
-     * 4. 提取 EffectiveCoverageArea：area = coverage.getArea()。
+     *    如果不可达，返回 0。
+     * 3. 提取 Probability：取 grids 中各 Grid 的 probability 平均值。
+     *    如果一个 AccessTask 覆盖多个 Grid，平均概率能较好反映整体覆盖价值。
+     * 4. 提取 EffectiveCoverageArea：coverage.getArea()。
      *    使用 JtsGeometryUtil 进行空值安全检查。
      * 5. 计算 TimeWeight：
      *    - 如果 accessTime 在 currentTime 之前（或相等），等待时间为 0。
      *    - 否则，等待时间 = Duration.between(currentTime, accessTime).getSeconds()。
      *    - timeWeight = 1.0 / (1.0 + waitSeconds)。
      * 6. 计算 Score：score = probability × area × timeWeight。
-     * 7. 将 score 写回 candidate.setScore()。
+     * 7. 返回 score。
      * </p>
      *
-     * @param candidate   候选任务
+     * @param accessTask  访问任务
      * @param currentTime 当前规划时间
+     * @return 综合评分，<= 0 表示不可行
      */
     @Override
-    public void scoreTask(TaskCandidate candidate, LocalDateTime currentTime) {
-        if (candidate == null) {
-            return;
+    public double scoreTask(AccessTask accessTask, LocalDateTime currentTime) {
+        if (accessTask == null) {
+            return 0.0;
         }
 
         // 步骤 1：参数校验
-        if (candidate.getGrid() == null || JtsGeometryUtil.isEmptyOrInvalid(candidate.getCoverage())) {
-            candidate.setScore(0.0);
-            return;
+        if (JtsGeometryUtil.isEmptyOrInvalid(accessTask.getCoverage())) {
+            log.debug("访问任务 {} 的 coverage 为空，评分为 0", accessTask.getAccessId());
+            return 0.0;
+        }
+        if (accessTask.getGrids() == null || accessTask.getGrids().isEmpty()) {
+            log.debug("访问任务 {} 的 grids 为空，评分为 0", accessTask.getAccessId());
+            return 0.0;
         }
 
         // 步骤 2：可达性判断
-        // 注意：currentTime 和 accessTime 可能为 null，需要防御
-        LocalDateTime accessTime = candidate.getAccessTime();
+        // 使用 AccessTask 覆盖的第一个 Grid 和 accessTime 进行可达性判断
+        // TODO: 后续可达性判断可以基于 AccessTask 的整体 coverage 而非单个 Grid
+        Grid representativeGrid = accessTask.getGrids().get(0);
         boolean reachable = reachabilityService.isReachable(
-                candidate.getGrid(),
+                representativeGrid,
                 currentTime,
-                accessTime,
+                accessTask.getAccessTime(),
                 0.0 // targetSpeed 当前版本在 ReachabilityService 中未使用
         );
         if (!reachable) {
-            candidate.setScore(0.0);
-            return;
+            log.debug("访问任务 {} 不可达，评分为 0", accessTask.getAccessId());
+            return 0.0;
         }
 
-        // 步骤 3：提取 Probability
-        double probability = candidate.getGrid().getProbability();
+        // 步骤 3：提取 Probability（取 grids 中各 Grid 的 probability 平均值）
+        double probability = accessTask.getGrids().stream()
+                .filter(g -> g != null)
+                .mapToDouble(Grid::getProbability)
+                .average()
+                .orElse(0.0);
+
         if (probability <= 0.0) {
-            candidate.setScore(0.0);
-            return;
+            log.debug("访问任务 {} 的平均概率为 0，评分为 0", accessTask.getAccessId());
+            return 0.0;
         }
 
         // 步骤 4：提取 EffectiveCoverageArea
-        double effectiveCoverageArea = candidate.getCoverage().getArea();
+        double effectiveCoverageArea = accessTask.getCoverage().getArea();
         if (effectiveCoverageArea <= 0.0) {
-            candidate.setScore(0.0);
-            return;
+            log.debug("访问任务 {} 的有效覆盖面积为 0，评分为 0", accessTask.getAccessId());
+            return 0.0;
         }
 
         // 步骤 5：计算 TimeWeight
-        double timeWeight = calculateTimeWeight(currentTime, accessTime);
+        double timeWeight = calculateTimeWeight(currentTime, accessTask.getAccessTime());
         if (timeWeight <= 0.0) {
-            candidate.setScore(0.0);
-            return;
+            log.debug("访问任务 {} 的时间权重为 0，评分为 0", accessTask.getAccessId());
+            return 0.0;
         }
 
         // 步骤 6：计算综合评分
@@ -123,13 +132,15 @@ public class TaskScoreServiceImpl implements TaskScoreService {
 
         // 防御：由于浮点计算，score 理论上非负，但做一层保护
         if (score < 0.0 || Double.isNaN(score) || Double.isInfinite(score)) {
-            log.warn("候选任务 {} 计算出异常评分：{}，强制设为 0",
-                    candidate.getTask() != null ? candidate.getTask().getTaskID() : "unknown", score);
+            log.warn("访问任务 {} 计算出异常评分：{}，强制设为 0",
+                    accessTask.getAccessId(), score);
             score = 0.0;
         }
 
-        // 步骤 7：写回评分
-        candidate.setScore(score);
+        log.debug("访问任务 {} 评分详情：probability={}, area={}, timeWeight={}, score={}",
+                accessTask.getAccessId(), probability, effectiveCoverageArea, timeWeight, score);
+
+        return score;
     }
 
     /**
@@ -172,28 +183,38 @@ public class TaskScoreServiceImpl implements TaskScoreService {
     }
 
     /**
-     * 批量为候选任务列表计算评分。
+     * 批量为访问任务列表计算评分。
      * <p>
-     * 遍历 candidates 列表，逐个调用 scoreTask 方法。
+     * 遍历 accessTasks 列表，逐个调用 scoreTask 方法。
+     * 返回与输入列表一一对应的评分结果列表。
+     * </p>
+     * <p>
      * 当前版本使用顺序遍历，后续可以优化为并行流（parallelStream）以提升性能。
      * </p>
      *
-     * @param candidates  候选任务列表
+     * @param accessTasks 访问任务列表
      * @param currentTime 当前规划时间
+     * @return 评分结果列表，与输入列表一一对应（index 相同）
      */
     @Override
-    public void scoreTasks(List<TaskCandidate> candidates, LocalDateTime currentTime) {
-        if (candidates == null || candidates.isEmpty()) {
-            return;
+    public List<Double> scoreTasks(List<AccessTask> accessTasks, LocalDateTime currentTime) {
+        if (accessTasks == null || accessTasks.isEmpty()) {
+            return new ArrayList<>();
         }
 
-        for (TaskCandidate candidate : candidates) {
-            scoreTask(candidate, currentTime);
+        List<Double> scores = new ArrayList<>(accessTasks.size());
+        int positiveCount = 0;
+
+        for (AccessTask accessTask : accessTasks) {
+            double score = scoreTask(accessTask, currentTime);
+            scores.add(score);
+            if (score > 0) {
+                positiveCount++;
+            }
         }
 
-        // 记录评分统计信息，便于调试
-        long positiveCount = candidates.stream().filter(c -> c.getScore() > 0).count();
-        log.debug("评分完成：候选总数={}, 正分候选数={}", candidates.size(), positiveCount);
+        log.debug("评分完成：访问任务总数={}, 正分任务数={}", accessTasks.size(), positiveCount);
+        return scores;
     }
 
 }

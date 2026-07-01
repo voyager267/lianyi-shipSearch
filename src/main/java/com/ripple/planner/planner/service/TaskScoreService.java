@@ -1,6 +1,6 @@
 package com.ripple.planner.planner.service;
 
-import com.ripple.planner.planner.model.TaskCandidate;
+import com.ripple.planner.planner.model.AccessTask;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -8,16 +8,23 @@ import java.util.List;
 /**
  * 任务评分服务接口。
  * <p>
- * 负责为每个候选任务（TaskCandidate）计算综合评分。
+ * 负责为每个 AccessService 动态生成的访问任务（AccessTask）计算综合评分。
  * 评分是规划器选择最优任务的核心依据，直接决定任务序列的质量。
  * </p>
  * <p>
  * 第一版评分公式：
  *     Score = Probability × EffectiveCoverageArea × TimeWeight
  * 其中：
- * - Probability = Grid.probability（目标存在于该网格的概率，由 ProbabilityService 计算）
- * - EffectiveCoverageArea = coverage.getArea()（任务在 Ripple 中的有效覆盖面积）
- * - TimeWeight = 1 / (1 + 等待时间秒数)（等待时间越长，权重越低）
+ * - Probability = AccessTask.grids 中各 Grid 的 probability 平均值（或聚合值）。
+ *                 表示目标存在于该访问任务覆盖区域的整体概率。
+ * - EffectiveCoverageArea = AccessTask.coverage.getArea()（访问任务的有效覆盖面积）。
+ * - TimeWeight = 1 / (1 + 等待时间秒数)（等待时间越长，权重越低）。
+ * </p>
+ * <p>
+ * 与旧版的区别：
+ * - 旧版输入 TaskCandidate（包装 TaskParam + Grid + coverage）。
+ * - 新版输入 AccessTask（AccessService 动态生成的访问机会，自带 coverage 和 grids）。
+ * 这体现了"Task 由 AccessService 动态生成"的核心设计思想。
  * </p>
  * <p>
  * 设计原则：
@@ -41,27 +48,34 @@ import java.util.List;
 public interface TaskScoreService {
 
     /**
-     * 为单个候选任务计算评分。
+     * 为单个访问任务计算评分。
      * <p>
-     * 根据当前规划时间、候选任务的概率、覆盖面积和时间因素，计算综合得分。
-     * 计算结果直接写回 candidate.setScore(score)。
+     * 根据当前规划时间、访问任务的概率、覆盖面积和时间因素，计算综合得分。
+     * 计算结果直接写回 accessTask 的扩展字段或通过返回值传递。
+     * </p>
+     * <p>
+     * 注意：当前版本将 score 作为方法的返回值，而非写入 AccessTask。
+     * 原因：AccessTask 是 AccessService 生成的数据对象，不应被评分服务修改。
+     *      后续如需在 AccessTask 中增加 score 字段，可以调整为写回模式。
      * </p>
      *
-     * @param candidate   候选任务，包含 grid（probability）、coverage、accessTime
+     * @param accessTask  访问任务，包含 grids（probability）、coverage、accessTime
      * @param currentTime 当前规划时间，用于计算等待时间和 TimeWeight
+     * @return 该访问任务的综合评分，score <= 0 表示不可行
      */
-    void scoreTask(TaskCandidate candidate, LocalDateTime currentTime);
+    double scoreTask(AccessTask accessTask, LocalDateTime currentTime);
 
     /**
-     * 批量为候选任务列表计算评分。
+     * 批量为访问任务列表计算评分。
      * <p>
-     * 遍历 candidates 列表，逐个调用 scoreTask 方法。
+     * 遍历 accessTasks 列表，逐个调用 scoreTask 方法。
      * 提供批量接口是为了方便后续引入并行计算（如使用 Stream.parallel() 或 CompletableFuture）。
      * </p>
      *
-     * @param candidates  候选任务列表
+     * @param accessTasks 访问任务列表
      * @param currentTime 当前规划时间
+     * @return 评分结果列表，与输入列表一一对应（index 相同）
      */
-    void scoreTasks(List<TaskCandidate> candidates, LocalDateTime currentTime);
+    List<Double> scoreTasks(List<AccessTask> accessTasks, LocalDateTime currentTime);
 
 }

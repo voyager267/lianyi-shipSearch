@@ -1,5 +1,6 @@
 package com.ripple.planner.planner.service;
 
+import com.ripple.planner.model.Cata;
 import com.ripple.planner.model.LianyiQueryParam;
 import com.ripple.planner.model.LianyiResultNew;
 import com.ripple.planner.model.TaskParam;
@@ -8,40 +9,45 @@ import com.ripple.planner.planner.util.JtsGeometryUtil;
 import com.ripple.planner.service.LianyiModelService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.locationtech.jts.geom.Envelope;
 import org.locationtech.jts.geom.Geometry;
 import org.springframework.stereotype.Service;
 
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 
 /**
  * 涟漪任务规划器实现类。
  * <p>
  * 基于贪心策略实现动态卫星搜索任务规划的核心闭环逻辑。
- * 规划循环包含以下步骤：
+ * 与旧版的核心区别：<strong>Planner 不再接收 candidateTasks，所有任务由 AccessService 动态生成</strong>。
+ * </p>
+ * <p>
+ * 规划循环步骤：
  * 1. 根据 historyTasks 构造 LianyiQueryParam，调用已有涟漪模型。
  * 2. 将涟漪结果转换为 JTS Geometry。
  * 3. 获取与 Ripple 相交的 Grid 列表。
  * 4. 计算每个 Grid 的概率。
- * 5. 计算所有候选任务（AccessService）。
- * 6. 对候选任务评分（TaskScoreService）。
- * 7. 选择 Score 最高的任务。
+ * 5. 调用 AccessService，输入 Grid 集合和时间窗口，动态生成 List&lt;AccessTask&gt;。
+ * 6. 调用 TaskScoreService 对所有 AccessTask 评分。
+ * 7. 选择 Score 最高的 AccessTask。
  * 8. 如果最高 Score == 0，终止规划。
- * 9. 更新 PlannerState（historyTasks、candidateTasks、taskSequence、currentTime）。
- * 10. 继续循环，直到满足终止条件。
+ * 9. 将选中的 AccessTask 转换为 TaskParam，加入 historyTasks，更新 currentTime。
+ * 10. 将 AccessTask 加入 TaskSequenceResult，继续循环。
  * </p>
  * <p>
  * 设计说明：
  * 1. 所有依赖通过构造函数注入，便于单元测试时 Mock。
  * 2. 规划循环使用 while(true)，但有明确的终止条件：
- *    - candidateTasks 为空
- *    - 所有候选任务 score == 0
+ *    - AccessService 返回空列表
+ *    - 所有 AccessTask 评分 == 0
  *    - 达到最大循环次数（安全保护）
  * 3. 每轮循环的 Ripple 区域都是基于更新后的 historyTasks 重新计算，体现"动态"特性。
- * 4. 使用 PlannerState 维护可变状态，TaskSequenceResult 收集最终结果。
- * 5. 日志详细记录每轮循环的关键数据，便于问题定位。
+ * 4. AccessTask 转换为 TaskParam 时使用 coverage 的外接矩形构造 Cata，
+ *    这是必要的适配，因为涟漪模型需要 Cata 四边形描述已搜索区域。
+ * 5. 时间窗口：每轮从 currentTime 开始，向后延伸 planningHour 小时，
+ *    AccessService 在此窗口内搜索卫星访问机会。
  * </p>
  */
 @Slf4j
@@ -59,8 +65,6 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
      * 最大规划循环次数。
      * <p>
      * 安全保护机制，防止因代码缺陷或异常数据导致无限循环。
-     * 默认值 10000 足够应对大多数场景（候选任务数通常在数百到数千级别）。
-     * 后续可通过配置化方式动态调整。
      * </p>
      */
     private static final int MAX_PLANNING_ITERATIONS = 10000;
@@ -78,7 +82,7 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
      * 执行任务规划。
      * <p>
      * 实现步骤：
-     * 1. 初始化 PlannerState 和 TaskSequenceResult。
+     * 1. 初始化 PlannerState（currentTime + historyTasks）和 TaskSequenceResult。
      * 2. 进入 while 规划循环。
      * 3. 每轮循环执行 Step1 ~ Step9。
      * 4. 满足终止条件时退出循环，封装结果并返回。
@@ -88,27 +92,25 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
      * @return 规划结果
      */
     @Override
-    public TaskSequenceResult plan(PlanningRequest request) {
+    public TaskSequenceResult plan(PlannerRequest request) {
         // ========== 步骤 0：参数校验与初始化 ==========
         if (request == null) {
             log.error("规划请求为空");
             return createEmptyResult("规划请求为空");
         }
-        if (request.getCandidateTasks() == null || request.getCandidateTasks().isEmpty()) {
-            log.warn("候选任务池为空，无需规划");
-            return createEmptyResult("候选任务池为空");
-        }
-        if (request.getStartTime() == null) {
+        if (request.getCurrentTime() == null) {
             log.error("规划起始时间为空");
             return createEmptyResult("规划起始时间为空");
         }
+        if (request.getPlanningHour() <= 0) {
+            log.error("规划时间窗口必须大于 0 小时");
+            return createEmptyResult("规划时间窗口必须大于 0 小时");
+        }
 
-        // 初始化规划状态
+        // 初始化规划状态（只保留 currentTime 和 historyTasks）
         PlannerState state = new PlannerState();
-        state.setCurrentTime(request.getStartTime());
+        state.setCurrentTime(request.getCurrentTime());
         state.setHistoryTasks(new ArrayList<>());
-        state.setCandidateTasks(new ArrayList<>(request.getCandidateTasks()));
-        state.setTaskSequence(new ArrayList<>());
 
         // 初始化结果对象
         TaskSequenceResult result = new TaskSequenceResult();
@@ -117,9 +119,9 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
         result.setTotalScore(0.0);
         result.setExecutionCount(0);
 
-        log.info("开始任务规划：中心=({}, {}), 目标={}, 起始时间={}, 候选任务数={}",
+        log.info("开始任务规划：中心=({}, {}), 目标={}, 起始时间={}, 规划窗口={}小时",
                 request.getCenterLon(), request.getCenterLat(), request.getEntityID(),
-                request.getStartTime(), state.getCandidateTasks().size());
+                request.getCurrentTime(), request.getPlanningHour());
 
         int iteration = 0;
 
@@ -153,13 +155,12 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
                 break;
             }
 
-            // 计算 Ripple 总面积（使用涟漪模型返回的 area 累加，与模型内部保持一致）
+            // 计算 Ripple 总面积
             double rippleArea = rippleResults.stream()
                     .filter(r -> r != null)
                     .mapToDouble(LianyiResultNew::getArea)
                     .sum();
             if (rippleArea <= 0) {
-                // 如果涟漪模型未返回有效面积，退化为几何计算
                 rippleArea = geometryService.calculateArea(rippleGeometry);
                 log.debug("涟漪模型返回面积无效，使用几何计算面积：{}", rippleArea);
             }
@@ -179,77 +180,66 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
             // ---------- Step 4：计算每个 Grid 的概率 ----------
             probabilityService.calculateProbabilities(rippleGrids, rippleGeometry, rippleArea);
 
-            // ---------- Step 5：计算所有候选 Task ----------
-            List<TaskCandidate> candidates = accessService.calculateAccess(
-                    state.getCandidateTasks(),
-                    rippleGrids,
-                    rippleGeometry,
-                    state.getCurrentTime(),
-                    geometryService
-            );
-            if (candidates.isEmpty()) {
-                log.info("第 {} 轮无候选任务，终止规划", iteration);
-                result.setMessage("规划完成：无可用候选任务");
+            // ---------- Step 5：调用 AccessService 动态生成访问任务 ----------
+            // 时间窗口：[currentTime, currentTime + planningHour]
+            java.time.LocalDateTime windowStart = state.getCurrentTime();
+            java.time.LocalDateTime windowEnd = windowStart.plusHours(request.getPlanningHour());
+
+            List<AccessTask> accessTasks = accessService.calculateAccess(rippleGrids, windowStart, windowEnd);
+            if (accessTasks == null || accessTasks.isEmpty()) {
+                log.info("第 {} 轮时间窗口 [{} ~ {}] 内无卫星访问机会，终止规划",
+                        iteration, windowStart, windowEnd);
+                result.setMessage("规划完成：时间窗口内无卫星访问机会");
                 break;
             }
-            log.debug("第 {} 轮候选任务数：{}", iteration, candidates.size());
+            log.debug("第 {} 轮 AccessService 生成访问任务数：{}", iteration, accessTasks.size());
 
             // ---------- Step 6：任务评分 ----------
-            taskScoreService.scoreTasks(candidates, state.getCurrentTime());
+            List<Double> scores = taskScoreService.scoreTasks(accessTasks, state.getCurrentTime());
 
             // ---------- Step 7：选择 Score 最高的任务 ----------
-            TaskCandidate bestCandidate = candidates.stream()
-                    .max(Comparator.comparingDouble(TaskCandidate::getScore))
-                    .orElse(null);
+            int bestIndex = -1;
+            double bestScore = 0.0;
+            for (int i = 0; i < scores.size(); i++) {
+                double score = scores.get(i);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestIndex = i;
+                }
+            }
 
-            if (bestCandidate == null) {
+            if (bestIndex < 0) {
                 log.info("第 {} 轮无法确定最优候选，终止规划", iteration);
                 result.setMessage("规划完成：无法确定最优候选任务");
                 break;
             }
 
-            double bestScore = bestCandidate.getScore();
-            log.debug("第 {} 轮最优候选：taskID={}, score={}",
-                    iteration,
-                    bestCandidate.getTask() != null ? bestCandidate.getTask().getTaskID() : "null",
-                    bestScore);
+            AccessTask bestTask = accessTasks.get(bestIndex);
+            log.debug("第 {} 轮最优候选：accessId={}, satellite={}, accessTime={}, score={}",
+                    iteration, bestTask.getAccessId(), bestTask.getSatellite(),
+                    bestTask.getAccessTime(), bestScore);
 
             // ---------- Step 8：如果最高 Score == 0，结束规划 ----------
             if (bestScore <= 0.0) {
                 log.info("第 {} 轮最优任务评分不大于 0（score={}），终止规划", iteration, bestScore);
-                result.setMessage("规划完成：所有候选任务评分均为 0，无法继续优化");
+                result.setMessage("规划完成：所有访问任务评分均为 0，无法继续优化");
                 break;
             }
 
             // ---------- Step 9：更新 PlannerState ----------
-            TaskParam selectedTask = bestCandidate.getTask();
-            if (selectedTask == null) {
-                log.error("最优候选任务为 null，终止规划");
-                result.setMessage("规划异常：最优候选任务为空");
-                break;
-            }
-
-            // 更新状态
-            state.getHistoryTasks().add(selectedTask);
-            state.getCandidateTasks().remove(selectedTask);
-            state.getTaskSequence().add(selectedTask);
-            state.setCurrentTime(bestCandidate.getAccessTime());
+            // 将 AccessTask 转换为 TaskParam，加入 historyTasks（涟漪模型需要）
+            TaskParam historyTask = convertAccessTaskToTaskParam(bestTask);
+            state.getHistoryTasks().add(historyTask);
+            state.setCurrentTime(bestTask.getAccessTime());
 
             // 更新结果
-            result.getTaskSequence().add(selectedTask);
-            result.getRecords().add(new SearchRecord(selectedTask, bestCandidate.getAccessTime()));
+            result.getTaskSequence().add(bestTask);
+            result.getRecords().add(new SearchRecord(bestTask, bestTask.getAccessTime()));
             result.setTotalScore(result.getTotalScore() + bestScore);
 
-            log.info("第 {} 轮选中任务：taskID={}, satellite={}, accessTime={}, score={}, 剩余候选={}",
-                    iteration, selectedTask.getTaskID(), selectedTask.getSatellite(),
-                    bestCandidate.getAccessTime(), bestScore, state.getCandidateTasks().size());
-
-            // 额外终止条件：候选任务池已耗尽
-            if (state.getCandidateTasks().isEmpty()) {
-                log.info("候选任务池已耗尽，规划完成");
-                result.setMessage("规划完成：候选任务池已耗尽");
-                break;
-            }
+            log.info("第 {} 轮选中任务：accessId={}, satellite={}, accessTime={}, score={}, 已执行任务数={}",
+                    iteration, bestTask.getAccessId(), bestTask.getSatellite(),
+                    bestTask.getAccessTime(), bestScore, state.getHistoryTasks().size());
         }
 
         // 检查是否因达到最大循环次数而终止
@@ -275,7 +265,7 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
     /**
      * 构造涟漪模型查询参数。
      * <p>
-     * 根据 PlanningRequest 中的静态参数和 PlannerState 中的动态参数，
+     * 根据 PlannerRequest 中的静态参数和 PlannerState 中的动态参数，
      * 构造每轮循环所需的 LianyiQueryParam。
      * </p>
      *
@@ -283,30 +273,74 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
      * @param state   规划状态（动态参数）
      * @return 涟漪模型查询参数
      */
-    private LianyiQueryParam buildLianyiQueryParam(PlanningRequest request, PlannerState state) {
+    private LianyiQueryParam buildLianyiQueryParam(PlannerRequest request, PlannerState state) {
         LianyiQueryParam param = new LianyiQueryParam();
         param.setCenterLon(request.getCenterLon());
         param.setCenterLat(request.getCenterLat());
         param.setEntityID(request.getEntityID());
-        param.setTargetLastFindTime(request.getTargetLastFindTime());
-        param.setSpeed(request.getTargetSpeed());
+        param.setSpeed(request.getSpeed());
+
+        // targetLastFindTime 从 LocalDateTime 格式化为 String
+        if (request.getTargetLastFindTime() != null) {
+            param.setTargetLastFindTime(request.getTargetLastFindTime().format(DATE_TIME_FORMATTER));
+        }
 
         // scoutTime 使用当前规划时间格式化后的字符串
         param.setScoutTime(state.getCurrentTime().format(DATE_TIME_FORMATTER));
 
         // taskIDs 使用当前已执行任务列表的副本
-        // 使用 new ArrayList 创建副本，避免涟漪模型修改我们的内部状态
         param.setTaskIDs(new ArrayList<>(state.getHistoryTasks()));
 
         return param;
     }
 
     /**
-     * 创建空的规划结果。
+     * 将 AccessTask 转换为 TaskParam。
      * <p>
-     * 辅助方法，在规划因参数错误无法开始时返回一个合法的空结果对象，
-     * 避免返回 null 引发调用方 NPE。
+     * 这是必要的适配层：涟漪模型需要 TaskParam（含 Cata 四边形）作为历史任务输入，
+     * 而 AccessService 输出的是 AccessTask（含 JTS Geometry）。
      * </p>
+     * <p>
+     * 转换逻辑：
+     * 1. taskID = accessTask.accessId
+     * 2. satellite = accessTask.satellite
+     * 3. scoutTime = accessTask.accessTime 格式化为 String
+     * 4. catas：从 coverage Geometry 的外接矩形（Envelope）构造一个 Cata 四边形。
+     *    这是一种近似，用外接矩形代表 AccessTask 的不规则覆盖区域。
+     *    后续如果涟漪模型支持任意多边形输入，可以优化此转换。
+     * </p>
+     *
+     * @param accessTask 访问任务
+     * @return 可供涟漪模型使用的 TaskParam
+     */
+    private TaskParam convertAccessTaskToTaskParam(AccessTask accessTask) {
+        TaskParam taskParam = new TaskParam();
+        taskParam.setTaskID(accessTask.getAccessId());
+        taskParam.setSatellite(accessTask.getSatellite());
+        taskParam.setScoutTime(accessTask.getAccessTime().format(DATE_TIME_FORMATTER));
+
+        // 从 coverage 的 Envelope 构造 Cata 四边形
+        Envelope env = accessTask.getCoverage().getEnvelopeInternal();
+        Cata cata = new Cata();
+        // lb: left bottom (minX, minY)
+        cata.setCatalbLongitude(env.getMinX());
+        cata.setCatalbLatitude(env.getMinY());
+        // rb: right bottom (maxX, minY)
+        cata.setCatarbLongitude(env.getMaxX());
+        cata.setCatarbLatitude(env.getMinY());
+        // rt: right top (maxX, maxY)
+        cata.setCatartLongitude(env.getMaxX());
+        cata.setCatartLatitude(env.getMaxY());
+        // lt: left top (minX, maxY)
+        cata.setCataltLongitude(env.getMinX());
+        cata.setCataltLatitude(env.getMaxY());
+
+        taskParam.setCatas(List.of(cata));
+        return taskParam;
+    }
+
+    /**
+     * 创建空的规划结果。
      *
      * @param message 结果描述信息
      * @return 空的 TaskSequenceResult

@@ -1,15 +1,8 @@
 package com.ripple.planner.controller;
 
-import com.ripple.planner.planner.model.PlanningRequest;
+import com.ripple.planner.planner.model.PlannerRequest;
 import com.ripple.planner.planner.model.TaskSequenceResult;
 import com.ripple.planner.planner.service.RippleTaskPlanner;
-import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.Parameter;
-import io.swagger.v3.oas.annotations.media.Content;
-import io.swagger.v3.oas.annotations.media.Schema;
-import io.swagger.v3.oas.annotations.responses.ApiResponse;
-import io.swagger.v3.oas.annotations.responses.ApiResponses;
-import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -22,8 +15,13 @@ import org.springframework.web.bind.annotation.*;
  * </p>
  * <p>
  * 接口设计：
- * - POST /api/v1/plan：接收 PlanningRequest，返回 TaskSequenceResult。
+ * - POST /api/v1/plan：接收 PlannerRequest，返回 TaskSequenceResult。
  * - GET /api/v1/health：健康检查端点，用于服务状态监控。
+ * </p>
+ * <p>
+ * 与旧版的区别：
+ * - 旧版接收 PlanningRequest（含 candidateTasks）。
+ * - 新版接收 PlannerRequest（不含任何 Task 输入，所有任务由 AccessService 动态生成）。
  * </p>
  * <p>
  * 设计说明：
@@ -38,7 +36,6 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/v1")
 @RequiredArgsConstructor
-@Tag(name = "任务规划接口", description = "卫星搜索任务规划相关的 REST API，支持任务序列规划和健康检查")
 public class TaskPlanningController {
 
     /**
@@ -49,7 +46,7 @@ public class TaskPlanningController {
     /**
      * 执行任务规划。
      * <p>
-     * 接收规划请求，调用 RippleTaskPlanner 执行贪心策略规划，返回任务序列。
+     * 接收规划请求，调用 RippleTaskPlanner 执行贪心策略规划，返回 AccessTask 序列。
      * </p>
      * <p>
      * 请求示例（JSON）：
@@ -58,53 +55,25 @@ public class TaskPlanningController {
      *   "centerLon": 116.4,
      *   "centerLat": 39.9,
      *   "entityID": "TARGET_001",
-     *   "targetLastFindTime": "2026-07-01 08:00:00",
-     *   "targetSpeed": 10.0,
-     *   "startTime": "2026-07-01 09:00:00",
-     *   "candidateTasks": [
-     *     {
-     *       "taskID": "TASK_001",
-     *       "satellite": "SAT_01",
-     *       "scoutTime": "2026-07-01 10:00:00",
-     *       "catas": [
-     *         {
-     *           "catalbLatitude": 39.8,
-     *           "catalbLongitude": 116.3,
-     *           "catartLatitude": 40.0,
-     *           "catartLongitude": 116.5,
-     *           "cataltLatitude": 40.0,
-     *           "cataltLongitude": 116.3,
-     *           "catarbLatitude": 39.8,
-     *           "catarbLongitude": 116.5
-     *         }
-     *       ]
-     *     }
-     *   ]
+     *   "targetLastFindTime": "2026-07-01T08:00:00",
+     *   "currentTime": "2026-07-01T09:00:00",
+     *   "speed": 10.0,
+     *   "planningHour": 6
      * }
      * </pre>
+     * </p>
+     * <p>
+     * 注意：请求中不包含任何 Task 信息，所有任务由 Planner 内部通过 AccessService 动态生成。
      * </p>
      *
      * @param request 规划请求
      * @return 规划结果，HTTP 200
      */
     @PostMapping("/plan")
-    @Operation(
-            summary = "执行任务规划",
-            description = "接收规划请求，调用 RippleTaskPlanner 执行贪心策略规划，返回最优任务序列。" +
-                    "系统会根据目标位置、速度、候选卫星任务等参数，计算最高效的搜索任务执行顺序。"
-    )
-    @ApiResponses({
-            @ApiResponse(responseCode = "200", description = "规划成功",
-                    content = @Content(mediaType = "application/json",
-                            schema = @Schema(implementation = TaskSequenceResult.class)))
-    })
-    public ResponseEntity<TaskSequenceResult> plan(
-            @Parameter(description = "规划请求参数，包含目标信息和候选任务列表", required = true)
-            @RequestBody PlanningRequest request) {
-        log.info("收到规划请求：center=({}, {}), entityID={}, 候选任务数={}",
+    public ResponseEntity<TaskSequenceResult> plan(@RequestBody PlannerRequest request) {
+        log.info("收到规划请求：center=({}, {}), entityID={}, 起始时间={}, 窗口={}小时",
                 request.getCenterLon(), request.getCenterLat(),
-                request.getEntityID(),
-                request.getCandidateTasks() != null ? request.getCandidateTasks().size() : 0);
+                request.getEntityID(), request.getCurrentTime(), request.getPlanningHour());
 
         TaskSequenceResult result = rippleTaskPlanner.plan(request);
 
@@ -124,12 +93,6 @@ public class TaskPlanningController {
      * @return "UP"
      */
     @GetMapping("/health")
-    @Operation(
-            summary = "健康检查",
-            description = "服务存活探测端点，用于负载均衡健康检查和监控系统。返回 UP 表示服务正常。"
-    )
-    @ApiResponse(responseCode = "200", description = "服务正常",
-            content = @Content(mediaType = "text/plain", schema = @Schema(type = "string", example = "UP")))
     public ResponseEntity<String> health() {
         return ResponseEntity.ok("UP");
     }
