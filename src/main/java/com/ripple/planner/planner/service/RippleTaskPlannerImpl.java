@@ -234,7 +234,11 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
 
             // 更新结果
             result.getTaskSequence().add(bestTask);
-            result.getRecords().add(new SearchRecord(bestTask, bestTask.getAccessTime()));
+            SearchRecord record = new SearchRecord();
+            record.setAccessTask(bestTask);
+            record.setExecutedAt(bestTask.getAccessTime());
+            record.setRippleResults(rippleResults);
+            result.getRecords().add(record);
             result.setTotalScore(result.getTotalScore() + bestScore);
 
             log.info("第 {} 轮选中任务：accessId={}, satellite={}, accessTime={}, score={}, 已执行任务数={}",

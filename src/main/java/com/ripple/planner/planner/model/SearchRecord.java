@@ -1,10 +1,13 @@
 package com.ripple.planner.planner.model;
 
+import com.ripple.planner.model.LianyiResultNew;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 搜索记录。
@@ -25,6 +28,7 @@ import java.time.LocalDateTime;
  * 2. executedAt 使用 LocalDateTime，表示 Planner 模块内部使用的标准时间类型。
  * 3. 在 RippleTaskPlanner 的规划循环中，每次选中 AccessTask 后创建 SearchRecord，
  *    并加入 TaskSequenceResult 的 records 列表。
+ * 4. rippleResults 保存该轮涟漪模型计算出的区域范围，用于前端展示计算过程。
  * </p>
  */
 @Data
@@ -50,5 +54,14 @@ public class SearchRecord {
      * </p>
      */
     private LocalDateTime executedAt;
+
+    /**
+     * 该轮涟漪模型计算出的区域范围。
+     * <p>
+     * 每轮规划循环调用涟漪模型后，返回的目标可能存在区域列表。
+     * 用于前端展示每增加一个任务后的计算过程区域范围。
+     * </p>
+     */
+    private List<LianyiResultNew> rippleResults = new ArrayList<>();
 
 }
