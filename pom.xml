@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        项目坐标定义
+        采用 com.ripple.planner 作为 groupId，体现项目归属与领域
+    -->
+    <groupId>com.ripple</groupId>
+    <artifactId>ripple-satellite-planner</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <!--
+        项目名称与描述
+        用于 Maven 仓库与文档展示
+    -->
+    <name>ripple-satellite-planner</name>
+    <description>基于涟漪模型的动态卫星搜索任务规划系统</description>
+
+    <!--
+        父工程继承 Spring Boot 3.x
+        统一管理依赖版本，简化配置
+        3.2.x 系列兼容 Java 17
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.5</version>
+        <relativePath/>
+    </parent>
+
+    <!--
+        全局属性配置
+        - java.version: 指定 Java 17，与 Spring Boot 3.x 要求一致
+        - project.build.sourceEncoding: 统一源码编码为 UTF-8，避免中文注释乱码
+        - jts.version: JTS 拓扑套件版本，用于几何计算
+    -->
+    <properties>
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <jts.version>1.19.0</jts.version>
+    </properties>
+
+    <dependencies>
+        <!--
+            ==================== Spring Boot 核心依赖 ====================
+        -->
+
+        <!--
+            Spring Boot Web Starter
+            提供嵌入式 Tomcat、Spring MVC、REST 支持
+            用于暴露任务规划 HTTP 接口
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!--
+            Spring Boot Validation
+            提供 Bean Validation 支持（@Valid、@NotNull 等）
+            用于接口入参校验
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!--
+            ==================== 几何计算依赖 ====================
+        -->
+
+        <!--
+            JTS Topology Suite (Java Topology Suite)
+            提供二维几何对象建模、拓扑运算、空间分析能力
+            本项目中用于：
+            1. 将涟漪模型的 LianyiPoint 列表转换为 JTS Polygon / MultiPolygon
+            2. 构造带洞 Polygon (Polygon With Holes)
+            3. 计算几何相交面积 (intersection)
+            4. 判断 Grid 与 Ripple 是否相交
+            选择 org.locationtech.jts 坐标，这是 Eclipse 基金会维护的社区版
+        -->
+        <dependency>
+            <groupId>org.locationtech.jts</groupId>
+            <artifactId>jts-core</artifactId>
+            <version>${jts.version}</version>
+        </dependency>
+
+        <!--
+            ==================== 工具类依赖 ====================
+        -->
+
+        <!--
+            Lombok
+            通过注解自动生成 getter/setter/toString/equals/hashCode/构造函数
+            大幅减少样板代码，提升可读性
+            配合 @Slf4j 提供日志支持
+            scope 设为 provided，因为只在编译期使用，运行期不需要
+        -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
+            ==================== API 文档依赖 ====================
+        -->
+
+        <!--
+            Knife4j - 基于 SpringDoc OpenAPI 的增强型 API 文档工具
+            专为 Spring Boot 3.x (Jakarta EE) 设计
+            默认访问路径: /doc.html
+            提供比原生 Swagger UI 更美观的界面和更强大的调试功能
+        -->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+            <version>4.4.0</version>
+        </dependency>
+
+        <!--
+            ==================== 测试依赖 ====================
+        -->
+
+        <!--
+            Spring Boot Test Starter
+            提供 JUnit 5、Mockito、Spring Test 等测试框架
+            用于单元测试与集成测试
+            scope 设为 test，只在测试阶段使用
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Spring Boot Maven Plugin
+                提供可执行 JAR 打包、运行、AOT 处理等功能
+                执行 mvn spring-boot:run 即可启动应用
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!--
+                        排除 Lombok，避免被打包进可执行 JAR
+                        因为 Lombok 是编译期工具，运行期不需要
+                    -->
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+
+            <!--
+                Maven Compiler Plugin
+                显式配置源码与目标字节码版本为 Java 17
+                确保编译时正确处理 var、新集合方法等 Java 17 特性
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>17</source>
+                    <target>17</target>
+                    <encoding>UTF-8</encoding>
+                    <annotationProcessorPaths>
+                        <!--
+                            显式声明 Lombok 注解处理器路径
+                            解决某些 IDE 环境下 Lombok 注解不被识别的问题
+                        -->
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
