@@ -3,6 +3,10 @@ package com.ripple.planner.planner.service;
 import com.ripple.planner.planner.model.AccessTask;
 import com.ripple.planner.planner.model.Grid;
 import lombok.extern.slf4j.Slf4j;
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Envelope;
+import org.locationtech.jts.geom.GeometryFactory;
+import org.locationtech.jts.geom.Polygon;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -67,6 +71,25 @@ public class MockAccessService implements AccessService {
     private static final int MAX_ACCESS_PER_GRID = 5;
 
     /**
+     * 模拟覆盖范围正方形边长池（单位：公里）。
+     * <p>
+     * 从该池中随机选取一个值作为 AccessTask coverage 的边长，
+     * 以 Grid 中心点为中心构造正方形覆盖区域。
+     * </p>
+     */
+    private static final double[] SQUARE_SIDE_KM_POOL = {50, 100, 150, 200, 300};
+
+    /**
+     * 每度纬度对应的公里数（近似值，用于将公里转换为度）。
+     */
+    private static final double KM_PER_DEGREE_LAT = 111.32;
+
+    /**
+     * JTS 几何工厂，用于构造模拟覆盖多边形。
+     */
+    private final GeometryFactory geometryFactory = new GeometryFactory();
+
+    /**
      * 计算模拟的卫星访问机会。
      * <p>
      * 对每个输入的 Grid 生成随机数量的 AccessTask，
@@ -114,9 +137,11 @@ public class MockAccessService implements AccessService {
                 task.setAccessId(grid.getId() + "_ACCESS_" + i);
                 task.setSatellite(satellite);
                 task.setAccessTime(accessTime);
-                // 简化：coverage 直接使用 Grid 的几何形状
-                // TODO Replace with real access calculation service：真实实现中应使用 SGP4 计算的精确覆盖多边形
-                task.setCoverage(grid.getGeometry());
+
+                // 模拟覆盖范围：以 Grid 中心点为中心，从 50/100/150/200/300km 中随机选一个边长构造正方形
+                Polygon coverage = createRandomSquareCoverage(grid);
+                task.setCoverage(coverage);
+
                 // 简化：每个 AccessTask 只覆盖一个 Grid
                 // TODO Replace with real access calculation service：真实实现中一个 AccessTask 可能覆盖多个相邻 Grid
                 task.setGrids(List.of(grid));
@@ -129,6 +154,48 @@ public class MockAccessService implements AccessService {
                 grids.size(), accessTasks.size(), startTime, endTime);
 
         return accessTasks;
+    }
+
+    /**
+     * 构造随机正方形覆盖区域。
+     * <p>
+     * 以给定 Grid 的中心点为基准，从 {@link #SQUARE_SIDE_KM_POOL} 中随机选取一个边长，
+     * 构造一个轴对齐的正方形 Polygon 作为卫星任务的模拟覆盖范围。
+     * </p>
+     * <p>
+     * 坐标转换说明：
+     * - 纬度方向：1° ≈ 111.32 km，直接除法转换。
+     * - 经度方向：1° ≈ 111.32 km × cos(纬度)，需根据中心点纬度修正，
+     *   避免高纬度区域正方形在经度方向上被过度拉伸。
+     * </p>
+     *
+     * @param grid 网格单元，取其中心点作为正方形中心
+     * @return 正方形覆盖多边形
+     */
+    private Polygon createRandomSquareCoverage(Grid grid) {
+        // 获取 Grid 的外接矩形，计算中心点
+        Envelope env = grid.getGeometry().getEnvelopeInternal();
+        double centerLon = env.getMinX() + (env.getMaxX() - env.getMinX()) / 2.0;
+        double centerLat = env.getMinY() + (env.getMaxY() - env.getMinY()) / 2.0;
+
+        // 随机选择边长（公里）
+        double sideKm = SQUARE_SIDE_KM_POOL[ThreadLocalRandom.current().nextInt(SQUARE_SIDE_KM_POOL.length)];
+        double halfSideKm = sideKm / 2.0;
+
+        // 公里转换为度（纬度方向）
+        double halfSideLatDeg = halfSideKm / KM_PER_DEGREE_LAT;
+        // 公里转换为度（经度方向，根据纬度修正）
+        double halfSideLonDeg = halfSideKm / (KM_PER_DEGREE_LAT * Math.cos(Math.toRadians(centerLat)));
+
+        // 构造正方形顶点（顺时针，首尾闭合）
+        Coordinate[] coords = new Coordinate[5];
+        coords[0] = new Coordinate(centerLon - halfSideLonDeg, centerLat - halfSideLatDeg); // 左下
+        coords[1] = new Coordinate(centerLon + halfSideLonDeg, centerLat - halfSideLatDeg); // 右下
+        coords[2] = new Coordinate(centerLon + halfSideLonDeg, centerLat + halfSideLatDeg); // 右上
+        coords[3] = new Coordinate(centerLon - halfSideLonDeg, centerLat + halfSideLatDeg); // 左上
+        coords[4] = coords[0]; // 闭合
+
+        return geometryFactory.createPolygon(coords);
     }
 
 }
