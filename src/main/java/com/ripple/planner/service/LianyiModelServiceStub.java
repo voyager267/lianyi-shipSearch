@@ -32,7 +32,7 @@ import java.util.List;
  * </p>
  */
 @Slf4j
-@Service
+// @Service  // 已替换为 LianyiModelServiceRemoteImpl，本地 Stub 不再注册为 Bean
 public class LianyiModelServiceStub implements LianyiModelService {
 
     /**

@@ -43,6 +43,12 @@ planner:
   # 网格分辨率（度），影响 GridService 的初始化
   grid-resolution: 1.0
 
+# 涟漪模型计算服务配置
+lianyi:
+  service:
+    # 涟漪模型服务基础地址
+    url: http://localhost:12223
+
 # Knife4j / SpringDoc OpenAPI 配置
 # 访问地址: http://127.0.0.1:8081/doc.html
 springdoc:
