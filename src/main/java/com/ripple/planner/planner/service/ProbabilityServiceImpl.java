@@ -88,6 +88,7 @@ public class ProbabilityServiceImpl implements ProbabilityService {
         // 使用并行流加速概率计算（每个 Grid 独立计算，无共享可变状态）
         gridList.parallelStream().forEach(grid -> {
             if (grid == null || JtsGeometryUtil.isEmptyOrInvalid(grid.getGeometry())) {
+                log.warn("grid 为空：{}", grid);
                 grid.setProbability(0.0);
                 return;
             }
@@ -99,6 +100,7 @@ public class ProbabilityServiceImpl implements ProbabilityService {
 
             // 计算概率 = 相交面积 / Ripple 总面积
             double probability = intersectionArea / rippleArea;
+            log.warn("相交面积占总面积：{}", probability);
 
             // 防御：概率理论上应在 [0, 1] 范围内，但浮点误差可能导致微小超出
             if (probability < 0.0) {

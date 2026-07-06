@@ -146,7 +146,7 @@ public class TaskScoreServiceImpl implements TaskScoreService {
     /**
      * 计算时间权重。
      * <p>
-     * 公式：timeWeight = 1.0 / (1.0 + waitSeconds)
+     * 公式：timeWeight = 1.0 / (1.0 + waitHours)
      * </p>
      * <p>
      * 边界情况：
@@ -170,16 +170,16 @@ public class TaskScoreServiceImpl implements TaskScoreService {
             return 1.0;
         }
 
-        // 计算等待时间（秒）
+        // 计算等待时间（小时），避免以秒为单位导致权重过极小
         Duration waitDuration = Duration.between(currentTime, accessTime);
-        long waitSeconds = waitDuration.getSeconds();
+        long waitHours = waitDuration.toHours();
 
         // 防止等待时间为负数（虽然前面已判断，但做双重保护）
-        if (waitSeconds < 0) {
-            waitSeconds = 0;
+        if (waitHours < 0) {
+            waitHours = 0;
         }
 
-        return 1.0 / (1.0 + waitSeconds);
+        return 1.0 / (1.0 + waitHours);
     }
 
     /**
@@ -211,6 +211,15 @@ public class TaskScoreServiceImpl implements TaskScoreService {
             if (score > 0) {
                 positiveCount++;
             }
+        }
+
+        // 标准化：Min-Max 归一化，让最高分为 1.0，其余按比例缩放
+        double maxScore = scores.stream().mapToDouble(Double::doubleValue).max().orElse(0.0);
+        if (maxScore > 0) {
+            for (int i = 0; i < scores.size(); i++) {
+                scores.set(i, scores.get(i) / maxScore);
+            }
+            log.debug("评分标准化完成：原始最高分={}, 标准化后范围 [0.0, 1.0]", maxScore);
         }
 
         log.debug("评分完成：访问任务总数={}, 正分任务数={}", accessTasks.size(), positiveCount);
