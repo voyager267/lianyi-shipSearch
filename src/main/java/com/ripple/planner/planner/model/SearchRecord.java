@@ -64,4 +64,26 @@ public class SearchRecord {
      */
     private List<LianyiResultNew> rippleResults = new ArrayList<>();
 
+    /**
+     * 未加入当前选中任务时的涟漪结果。
+     * <p>
+     * 表示在第 N 轮规划循环中，基于当前 historyTasks（不含本轮选中的访问任务）
+     * 调用涟漪模型计算出的目标可能存在区域列表。
+     * 用于与 {@link #afterAddTaskRippleResults} 对比，展示加入当前任务前后
+     * 涟漪区域的变化情况，辅助分析单个任务对整体搜索覆盖的贡献。
+     * </p>
+     */
+    private List<LianyiResultNew> beforeAddTaskRippleResults = new ArrayList<>();
+
+    /**
+     * 加入当前选中任务后的涟漪结果。
+     * <p>
+     * 表示在第 N 轮规划循环中，将本轮选中的访问任务加入 historyTasks 后，
+     * 再次调用涟漪模型计算出的目标可能存在区域列表。
+     * 与 {@link #beforeAddTaskRippleResults} 形成前后对比，
+     * 直观展示当前任务对缩小搜索范围、提升定位精度的影响。
+     * </p>
+     */
+    private List<LianyiResultNew> afterAddTaskRippleResults = new ArrayList<>();
+
 }

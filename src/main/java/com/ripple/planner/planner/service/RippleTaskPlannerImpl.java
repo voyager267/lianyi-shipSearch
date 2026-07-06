@@ -227,10 +227,32 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
             }
 
             // ---------- Step 9：更新 PlannerState ----------
+            // 先将时间推进到所选任务的时刻（但不加入 historyTasks）
+            state.setCurrentTime(bestTask.getAccessTime());
+
+            // 计算未加入当前任务、但时间已推进的涟漪结果（beforeAdd）
+            List<LianyiResultNew> beforeRippleResults;
+            try {
+                LianyiQueryParam beforeQueryParam = buildLianyiQueryParam(request, state);
+                beforeRippleResults = lianyiModelService.calculate(beforeQueryParam);
+            } catch (Exception e) {
+                log.warn("第 {} 轮计算 beforeAddTaskRippleResults 异常，使用空列表。error={}", iteration, e.getMessage());
+                beforeRippleResults = new ArrayList<>();
+            }
+
             // 将 AccessTask 转换为 TaskParam，加入 historyTasks（涟漪模型需要）
             TaskParam historyTask = convertAccessTaskToTaskParam(bestTask);
             state.getHistoryTasks().add(historyTask);
-            state.setCurrentTime(bestTask.getAccessTime());
+
+            // 计算加入当前任务后的涟漪结果（afterAdd）
+            List<LianyiResultNew> afterRippleResults;
+            try {
+                LianyiQueryParam afterQueryParam = buildLianyiQueryParam(request, state);
+                afterRippleResults = lianyiModelService.calculate(afterQueryParam);
+            } catch (Exception e) {
+                log.warn("第 {} 轮计算 afterAddTaskRippleResults 异常，使用空列表。error={}", iteration, e.getMessage());
+                afterRippleResults = new ArrayList<>();
+            }
 
             // 更新结果
             result.getTaskSequence().add(bestTask);
@@ -238,6 +260,8 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
             record.setAccessTask(bestTask);
             record.setExecutedAt(bestTask.getAccessTime());
             record.setRippleResults(rippleResults);
+            record.setBeforeAddTaskRippleResults(beforeRippleResults != null ? beforeRippleResults : new ArrayList<>());
+            record.setAfterAddTaskRippleResults(afterRippleResults != null ? afterRippleResults : new ArrayList<>());
             result.getRecords().add(record);
             result.setTotalScore(result.getTotalScore() + bestScore);
 
