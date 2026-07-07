@@ -67,7 +67,7 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
      * 安全保护机制，防止因代码缺陷或异常数据导致无限循环。
      * </p>
      */
-    private static final int MAX_PLANNING_ITERATIONS = 10;
+    private static final int MAX_PLANNING_ITERATIONS = 20;
 
     // ==================== 依赖注入 ====================
 
@@ -123,12 +123,24 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
                 request.getCenterLon(), request.getCenterLat(), request.getEntityID(),
                 request.getCurrentTime(), request.getPlanningHour());
 
+        // 计算固定的时间窗口截止时间：所有任务必须在 request.currentTime + planningHour 之前完成
+        java.time.LocalDateTime fixedWindowEnd = request.getCurrentTime().plusHours(request.getPlanningHour());
+        log.info("固定规划时间窗口：[{} ~ {}]", request.getCurrentTime(), fixedWindowEnd);
+
         int iteration = 0;
 
         // ========== 规划主循环 ==========
         while (iteration < MAX_PLANNING_ITERATIONS) {
             iteration++;
             log.debug("===== 规划循环第 {} 轮开始 =====", iteration);
+
+            // 如果当前时间已经超过固定窗口截止时间，终止规划
+            if (!state.getCurrentTime().isBefore(fixedWindowEnd)) {
+                log.info("当前时间({})已超过固定规划窗口截止时间({})，终止规划",
+                        state.getCurrentTime(), fixedWindowEnd);
+                result.setMessage("规划完成：当前时间已超过规划窗口截止时间");
+                break;
+            }
 
             // ---------- Step 1：调用已有涟漪模型 ----------
             LianyiQueryParam queryParam = buildLianyiQueryParam(request, state);
@@ -181,9 +193,9 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
             probabilityService.calculateProbabilities(rippleGrids, rippleGeometry, rippleArea);
 
             // ---------- Step 5：调用 AccessService 动态生成访问任务 ----------
-            // 时间窗口：[currentTime, currentTime + planningHour]
+            // 时间窗口：[currentTime, fixedWindowEnd]，fixedWindowEnd 固定为 request.currentTime + planningHour
             java.time.LocalDateTime windowStart = state.getCurrentTime();
-            java.time.LocalDateTime windowEnd = windowStart.plusHours(request.getPlanningHour());
+            java.time.LocalDateTime windowEnd = fixedWindowEnd;
 
             List<AccessTask> accessTasks = accessService.calculateAccess(rippleGrids, windowStart, windowEnd);
             if (accessTasks == null || accessTasks.isEmpty()) {
@@ -264,6 +276,28 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
             record.setAfterAddTaskRippleResults(afterRippleResults != null ? afterRippleResults : new ArrayList<>());
             result.getRecords().add(record);
             result.setTotalScore(result.getTotalScore() + bestScore);
+
+            // ---------- Step 9b：检查 afterRippleResults 面积占 beforeRippleResults 的比例 ----------
+            double beforeRippleAreaTotal = beforeRippleResults.stream()
+                    .filter(r -> r != null)
+                    .mapToDouble(LianyiResultNew::getArea)
+                    .sum();
+            double afterRippleAreaTotal = afterRippleResults.stream()
+                    .filter(r -> r != null)
+                    .mapToDouble(LianyiResultNew::getArea)
+                    .sum();
+
+            if (beforeRippleAreaTotal > 0) {
+                double areaRatio = afterRippleAreaTotal / beforeRippleAreaTotal;
+                log.debug("第 {} 轮涟漪面积比例：after={} / before={} = {}",
+                        iteration, afterRippleAreaTotal, beforeRippleAreaTotal, areaRatio);
+                if (areaRatio < 0.1) {
+                    log.info("第 {} 轮加入任务后涟漪区域面积({})占加入前({})的比例低于10%（{}），终止规划",
+                            iteration, afterRippleAreaTotal, beforeRippleAreaTotal, areaRatio);
+                    result.setMessage("规划完成：加入任务后涟漪区域面积衰减至10%以下");
+                    break;
+                }
+            }
 
             log.info("第 {} 轮选中任务：accessId={}, satellite={}, accessTime={}, score={}, 已执行任务数={}",
                     iteration, bestTask.getAccessId(), bestTask.getSatellite(),
