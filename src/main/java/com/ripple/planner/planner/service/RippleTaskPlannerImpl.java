@@ -233,6 +233,16 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
                     iteration, bestTask.getAccessId(), bestTask.getSatellite(),
                     bestTask.getAccessTime(), bestScore);
 
+            // ---------- 构建候选任务列表（用于前端展示对比） ----------
+            List<CandidateTask> candidateTasks = new ArrayList<>(accessTasks.size());
+            for (int i = 0; i < accessTasks.size(); i++) {
+                CandidateTask ct = new CandidateTask();
+                ct.setAccessTask(accessTasks.get(i));
+                ct.setScore(scores.get(i));          // 归一化后的评分 [0, 1]
+                ct.setSelected(i == bestIndex);      // 标记本轮选中
+                candidateTasks.add(ct);
+            }
+
             // ---------- Step 8：如果最高 Score == 0，结束规划 ----------
             if (bestScore <= 0.0) {
                 log.info("第 {} 轮最优任务评分不大于 0（score={}），终止规划", iteration, bestScore);
@@ -276,6 +286,7 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
             record.setRippleResults(rippleResults);
             record.setBeforeAddTaskRippleResults(beforeRippleResults != null ? beforeRippleResults : new ArrayList<>());
             record.setAfterAddTaskRippleResults(afterRippleResults != null ? afterRippleResults : new ArrayList<>());
+            record.setCandidateTasks(candidateTasks);   // 本轮所有候选任务及评分
             result.getRecords().add(record);
             result.setTotalScore(result.getTotalScore() + bestScore);
 

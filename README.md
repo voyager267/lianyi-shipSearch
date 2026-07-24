@@ -248,10 +248,29 @@ POST /api/v1/plan
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `taskSequence` | List&lt;AccessTask&gt; | 规划出的访问任务序列（按时间升序） |
-| `records` | List&lt;SearchRecord&gt; | 详细搜索记录（含每轮 Ripple 结果） |
+| `records` | List&lt;SearchRecord&gt; | 详细搜索记录（含每轮所有候选任务及评分） |
 | `totalScore` | double | 规划总得分 |
 | `executionCount` | int | 实际规划出的任务数量 |
 | `message` | string | 规划结果描述 |
+
+**SearchRecord 关键字段**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `accessTask` | AccessTask | 本轮被选中的访问任务 |
+| `executedAt` | string | 任务执行时间 |
+| `candidateTasks` | List&lt;CandidateTask&gt; | **本轮所有候选任务及评分**（前端可对比选中 vs 未选中） |
+| `rippleResults` | List&lt;LianyiResultNew&gt; | 本轮涟漪区域 |
+| `beforeAddTaskRippleResults` | List&lt;LianyiResultNew&gt; | 加入任务前的涟漪区域 |
+| `afterAddTaskRippleResults` | List&lt;LianyiResultNew&gt; | 加入任务后的涟漪区域 |
+
+**CandidateTask 字段**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `accessTask` | AccessTask | 候选访问任务（含 coverage GeoJSON） |
+| `score` | double | 归一化评分 [0, 1]，每轮最高分 = 1.0 |
+| `selected` | boolean | 是否被本轮选中（每轮仅一个 true） |
 
 **响应示例**
 
@@ -266,7 +285,32 @@ POST /api/v1/plan
       "grids": [ { "id": "row_39_col_116", "probability": 0.35 } ]
     }
   ],
-  "records": [ { "...SearchRecord..." } ],
+  "records": [
+    {
+      "accessTask": { "accessId": "row_39_col_116_ACCESS_0", "..." : "..." },
+      "executedAt": "2026-07-01 10:23:45",
+      "candidateTasks": [
+        {
+          "accessTask": { "accessId": "row_39_col_116_ACCESS_0", "..." : "..." },
+          "score": 1.0,
+          "selected": true
+        },
+        {
+          "accessTask": { "accessId": "row_40_col_117_ACCESS_1", "..." : "..." },
+          "score": 0.62,
+          "selected": false
+        },
+        {
+          "accessTask": { "accessId": "row_38_col_115_ACCESS_2", "..." : "..." },
+          "score": 0.15,
+          "selected": false
+        }
+      ],
+      "rippleResults": [ { "..." : "..." } ],
+      "beforeAddTaskRippleResults": [ { "..." : "..." } ],
+      "afterAddTaskRippleResults": [ { "..." : "..." } ]
+    }
+  ],
   "totalScore": 12.56,
   "executionCount": 5,
   "message": "规划成功：共选出 5 个任务"

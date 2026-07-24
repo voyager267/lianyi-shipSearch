@@ -12,7 +12,8 @@ import java.util.List;
 /**
  * 搜索记录。
  * <p>
- * 用于记录每一次已执行访问任务的详细信息，包括任务本身、执行时间和评分。
+ * 用于记录每一次已执行访问任务的详细信息，包括任务本身、执行时间、评分，
+ * 以及本轮所有候选任务（用于前端展示对比）。
  * 在规划结束后，SearchRecord 列表作为任务序列的详细日志，用于复盘和审计。
  * </p>
  * <p>
@@ -29,6 +30,7 @@ import java.util.List;
  * 3. 在 RippleTaskPlanner 的规划循环中，每次选中 AccessTask 后创建 SearchRecord，
  *    并加入 TaskSequenceResult 的 records 列表。
  * 4. rippleResults 保存该轮涟漪模型计算出的区域范围，用于前端展示计算过程。
+ * 5. candidateTasks 保存本轮所有候选任务及评分，前端可借此对比"选中 vs 未选中"的差异。
  * </p>
  */
 @Data
@@ -85,5 +87,25 @@ public class SearchRecord {
      * </p>
      */
     private List<LianyiResultNew> afterAddTaskRippleResults = new ArrayList<>();
+
+    /**
+     * 本轮规划中的所有候选任务及其评分。
+     * <p>
+     * 每轮规划循环中，AccessService 生成 N 个候选 AccessTask，
+     * TaskScoreService 对每个候选评分，Planner 从中选出得分最高的一个。
+     * 此列表记录了全部候选及其得分，前端可借此：
+     * </p>
+     * <ul>
+     *   <li>展示"本轮共考虑了哪些任务"</li>
+     *   <li>对比选中任务与未选中任务的得分差异</li>
+     *   <li>在地图上同时渲染所有候选 coverage 和选中 coverage</li>
+     *   <li>分析评分模型是否合理（如是否遗漏了直观上更好的任务）</li>
+     * </ul>
+     * <p>
+     * 每个 CandidateTask 的 selected 字段标识该任务是否被本轮选中。
+     * 每轮有且仅有一个 selected=true。
+     * </p>
+     */
+    private List<CandidateTask> candidateTasks = new ArrayList<>();
 
 }
