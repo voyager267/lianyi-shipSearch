@@ -5,6 +5,7 @@ import com.ripple.planner.planner.model.Grid;
 import com.ripple.planner.planner.util.JtsGeometryUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.locationtech.jts.geom.Geometry;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -13,24 +14,25 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 任务评分服务实现类。
+ * 任务评分服务实现类（第二版）。
  * <p>
- * 基于第一版评分公式实现：
- *     Score = Probability × EffectiveCoverageArea × TimeWeight
+ * 基于第二版评分公式实现：
+ *     Score = (Area(Ripple ∩ Coverage) / Area(Ripple)) × TimeWeight
  * </p>
  * <p>
- * 与旧版的适配说明：
- * 1. 输入从 TaskCandidate 改为 AccessTask。
- * 2. Probability 从 AccessTask.grids 中各 Grid 的 probability 计算得出（取平均值）。
- * 3. EffectiveCoverageArea 从 AccessTask.coverage 获取。
- * 4. TimeWeight 基于 AccessTask.accessTime 和 currentTime 计算。
- * 5. 评分框架本身未变，保持 Probability × Area × Time 的结构。
+ * 与第一版的区别：
+ * 1. 取消 Probability 因子（不再取 grids 的 probability 平均值）。
+ * 2. 取消 EffectiveCoverageArea 因子（不再直接用 coverage.getArea()）。
+ * 3. 改为计算"涟漪区域与任务覆盖区域交集的面积占涟漪面积的比例"。
+ *    这个比例直接反映任务对当前搜索热点区域的覆盖效率——
+ *    任务覆盖面积再大，如果不在涟漪区域内，评分也为 0；
+ *    反之，任务即使覆盖面积很小，只要精确命中涟漪区域的核心，也能获得高分。
  * </p>
  * <p>
  * 实现要点：
- * 1. 使用 GeometryService 进行相交计算和面积计算（当前版本 coverage 已由 AccessService 计算好，直接使用 getArea）。
+ * 1. 使用 GeometryService 进行相交计算和面积计算。
  * 2. 批量处理访问任务列表，逐个计算评分。
- * 3. 对边界情况进行防御性处理：coverage 为空、grids 为空、probability 为 0 时返回 0。
+ * 3. 对边界情况进行防御性处理：ripple/covarge 为空、ratio 为 0 时返回 0。
  * 4. 计算结果通过返回值传递，不修改 AccessTask 对象本身。
  * </p>
  */
@@ -41,83 +43,96 @@ public class TaskScoreServiceImpl implements TaskScoreService {
 
     /**
      * 可达性服务，用于判断任务是否可行。
-     * <p>
-     * 如果任务不可达（isReachable 返回 false），直接将 score 设为 0。
-     * </p>
      */
     private final ReachabilityService reachabilityService;
+
+    /**
+     * 几何服务，用于计算涟漪区域与任务覆盖区域的交集及面积。
+     * <p>
+     * 新增依赖：第二版评分需要计算 rippleGeometry ∩ coverage 的面积占比。
+     * </p>
+     */
+    private final GeometryService geometryService;
 
     /**
      * 为单个访问任务计算评分。
      * <p>
      * 实现步骤：
-     * 1. 参数校验：如果 accessTask 为 null 或 coverage/grids 为空，返回 0。
-     * 2. 判断可达性：调用 reachabilityService.isReachable()。
-     *    如果不可达，返回 0。
-     * 3. 提取 Probability：取 grids 中各 Grid 的 probability 平均值。
-     *    如果一个 AccessTask 覆盖多个 Grid，平均概率能较好反映整体覆盖价值。
-     * 4. 提取 EffectiveCoverageArea：coverage.getArea()。
-     *    使用 JtsGeometryUtil 进行空值安全检查。
-     * 5. 计算 TimeWeight：
-     *    - 如果 accessTime 在 currentTime 之前（或相等），等待时间为 0。
-     *    - 否则，等待时间 = Duration.between(currentTime, accessTime).getSeconds()。
-     *    - timeWeight = 1.0 / (1.0 + waitSeconds)。
-     * 6. 计算 Score：score = probability × area × timeWeight。
+     * 1. 参数校验：如果 accessTask 为 null 或 coverage 为空，返回 0。
+     * 2. 涟漪区域校验：如果 rippleGeometry 为空或 rippleArea <= 0，返回 0。
+     * 3. 可达性判断：调用 reachabilityService.isReachable()。
+     * 4. 计算交集面积占比：
+     *    - intersection = geometryService.intersect(rippleGeometry, coverage)
+     *    - intersectionArea = geometryService.calculateArea(intersection)
+     *    - ratio = intersectionArea / rippleArea（clamped to [0, 1]）
+     * 5. 计算 TimeWeight：timeWeight = 1.0 / (1.0 + waitHours)
+     * 6. 计算 Score：score = ratio × timeWeight
      * 7. 返回 score。
      * </p>
      *
-     * @param accessTask  访问任务
-     * @param currentTime 当前规划时间
+     * @param accessTask     访问任务
+     * @param currentTime    当前规划时间
+     * @param rippleGeometry 当前轮次的涟漪区域 JTS Geometry
+     * @param rippleArea     当前轮次的涟漪区域总面积
      * @return 综合评分，<= 0 表示不可行
      */
     @Override
-    public double scoreTask(AccessTask accessTask, LocalDateTime currentTime) {
+    public double scoreTask(AccessTask accessTask, LocalDateTime currentTime,
+                            Geometry rippleGeometry, double rippleArea) {
         if (accessTask == null) {
             return 0.0;
         }
 
-        // 步骤 1：参数校验
+        // 步骤 1：参数校验 — coverage
         if (JtsGeometryUtil.isEmptyOrInvalid(accessTask.getCoverage())) {
             log.debug("访问任务 {} 的 coverage 为空，评分为 0", accessTask.getAccessId());
             return 0.0;
         }
-        if (accessTask.getGrids() == null || accessTask.getGrids().isEmpty()) {
-            log.debug("访问任务 {} 的 grids 为空，评分为 0", accessTask.getAccessId());
+
+        // 步骤 2：涟漪区域校验
+        if (JtsGeometryUtil.isEmptyOrInvalid(rippleGeometry)) {
+            log.debug("涟漪区域为空，评分为 0");
+            return 0.0;
+        }
+        if (rippleArea <= 0.0) {
+            log.debug("涟漪区域面积 <= 0（{}），评分为 0", rippleArea);
             return 0.0;
         }
 
-        // 步骤 2：可达性判断
-        // 使用 AccessTask 覆盖的第一个 Grid 和 accessTime 进行可达性判断
-        // TODO: 后续可达性判断可以基于 AccessTask 的整体 coverage 而非单个 Grid
-        Grid representativeGrid = accessTask.getGrids().get(0);
-        boolean reachable = reachabilityService.isReachable(
-                representativeGrid,
-                currentTime,
-                accessTask.getAccessTime(),
-                0.0 // targetSpeed 当前版本在 ReachabilityService 中未使用
-        );
-        if (!reachable) {
-            log.debug("访问任务 {} 不可达，评分为 0", accessTask.getAccessId());
+        // 步骤 3：可达性判断
+        // 使用 AccessTask 覆盖的第一个 Grid 进行可达性判断；如果 grids 为空则跳过此检查
+        if (accessTask.getGrids() != null && !accessTask.getGrids().isEmpty()) {
+            Grid representativeGrid = accessTask.getGrids().get(0);
+            boolean reachable = reachabilityService.isReachable(
+                    representativeGrid,
+                    currentTime,
+                    accessTask.getAccessTime(),
+                    0.0 // targetSpeed 当前版本在 ReachabilityService 中未使用
+            );
+            if (!reachable) {
+                log.debug("访问任务 {} 不可达，评分为 0", accessTask.getAccessId());
+                return 0.0;
+            }
+        }
+
+        // 步骤 4：计算交集面积占比（替代原来的 probability 和 effectiveCoverageArea）
+        // ratio = Area(Ripple ∩ Coverage) / Area(Ripple)
+        Geometry intersection = geometryService.intersect(rippleGeometry, accessTask.getCoverage());
+        double intersectionArea = geometryService.calculateArea(intersection);
+
+        if (intersectionArea <= 0.0) {
+            log.debug("访问任务 {} 与涟漪区域无交集（intersectionArea={}），评分为 0",
+                    accessTask.getAccessId(), intersectionArea);
             return 0.0;
         }
 
-        // 步骤 3：提取 Probability（取 grids 中各 Grid 的 probability 平均值）
-        double probability = accessTask.getGrids().stream()
-                .filter(g -> g != null)
-                .mapToDouble(Grid::getProbability)
-                .average()
-                .orElse(0.0);
+        double ratio = intersectionArea / rippleArea;
 
-        if (probability <= 0.0) {
-            log.debug("访问任务 {} 的平均概率为 0，评分为 0", accessTask.getAccessId());
-            return 0.0;
-        }
-
-        // 步骤 4：提取 EffectiveCoverageArea
-        double effectiveCoverageArea = accessTask.getCoverage().getArea();
-        if (effectiveCoverageArea <= 0.0) {
-            log.debug("访问任务 {} 的有效覆盖面积为 0，评分为 0", accessTask.getAccessId());
-            return 0.0;
+        // 防御：ratio 理论上在 [0, 1] 范围内，但浮点误差可能导致微小超出
+        if (ratio < 0.0) {
+            ratio = 0.0;
+        } else if (ratio > 1.0) {
+            ratio = 1.0;
         }
 
         // 步骤 5：计算 TimeWeight
@@ -128,17 +143,17 @@ public class TaskScoreServiceImpl implements TaskScoreService {
         }
 
         // 步骤 6：计算综合评分
-        double score = probability * effectiveCoverageArea * timeWeight;
+        double score = ratio * timeWeight;
 
-        // 防御：由于浮点计算，score 理论上非负，但做一层保护
+        // 防御：处理异常浮点值
         if (score < 0.0 || Double.isNaN(score) || Double.isInfinite(score)) {
             log.warn("访问任务 {} 计算出异常评分：{}，强制设为 0",
                     accessTask.getAccessId(), score);
             score = 0.0;
         }
 
-        log.debug("访问任务 {} 评分详情：probability={}, area={}, timeWeight={}, score={}",
-                accessTask.getAccessId(), probability, effectiveCoverageArea, timeWeight, score);
+        log.debug("访问任务 {} 评分详情：rippleArea={}, intersectionArea={}, ratio={}, timeWeight={}, score={}",
+                accessTask.getAccessId(), rippleArea, intersectionArea, ratio, timeWeight, score);
 
         return score;
     }
@@ -152,7 +167,6 @@ public class TaskScoreServiceImpl implements TaskScoreService {
      * 边界情况：
      * - 如果 accessTime 为 null，视为立即执行（等待时间 0），返回 1.0。
      * - 如果 accessTime 在 currentTime 之前（计划时间已过去），视为等待时间 0，返回 1.0。
-     *   这是简化处理，后续可以引入惩罚机制（过期任务降低权重）。
      * - 如果 currentTime 为 null，视为等待时间 0，返回 1.0。
      * </p>
      *
@@ -187,17 +201,18 @@ public class TaskScoreServiceImpl implements TaskScoreService {
      * <p>
      * 遍历 accessTasks 列表，逐个调用 scoreTask 方法。
      * 返回与输入列表一一对应的评分结果列表。
-     * </p>
-     * <p>
-     * 当前版本使用顺序遍历，后续可以优化为并行流（parallelStream）以提升性能。
+     * 最后应用 Min-Max 归一化，让最高分为 1.0，其余按比例缩放。
      * </p>
      *
-     * @param accessTasks 访问任务列表
-     * @param currentTime 当前规划时间
+     * @param accessTasks    访问任务列表
+     * @param currentTime    当前规划时间
+     * @param rippleGeometry 当前轮次的涟漪区域 JTS Geometry
+     * @param rippleArea     当前轮次的涟漪区域总面积
      * @return 评分结果列表，与输入列表一一对应（index 相同）
      */
     @Override
-    public List<Double> scoreTasks(List<AccessTask> accessTasks, LocalDateTime currentTime) {
+    public List<Double> scoreTasks(List<AccessTask> accessTasks, LocalDateTime currentTime,
+                                   Geometry rippleGeometry, double rippleArea) {
         if (accessTasks == null || accessTasks.isEmpty()) {
             return new ArrayList<>();
         }
@@ -206,7 +221,7 @@ public class TaskScoreServiceImpl implements TaskScoreService {
         int positiveCount = 0;
 
         for (AccessTask accessTask : accessTasks) {
-            double score = scoreTask(accessTask, currentTime);
+            double score = scoreTask(accessTask, currentTime, rippleGeometry, rippleArea);
             scores.add(score);
             if (score > 0) {
                 positiveCount++;

@@ -207,7 +207,9 @@ public class RippleTaskPlannerImpl implements RippleTaskPlanner {
             log.debug("第 {} 轮 AccessService 生成访问任务数：{}", iteration, accessTasks.size());
 
             // ---------- Step 6：任务评分 ----------
-            List<Double> scores = taskScoreService.scoreTasks(accessTasks, state.getCurrentTime());
+            // 传入涟漪几何和面积，用于计算交集占比（第二版评分公式）
+            List<Double> scores = taskScoreService.scoreTasks(
+                    accessTasks, state.getCurrentTime(), rippleGeometry, rippleArea);
 
             // ---------- Step 7：选择 Score 最高的任务 ----------
             int bestIndex = -1;
