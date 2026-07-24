@@ -14,11 +14,13 @@ import java.util.List;
  * </p>
  * <p>
  * 第二版评分公式：
- *     Score = (Area(Ripple ∩ Coverage) / Area(Ripple)) × TimeWeight
+ *     Score = (Area(Ripple ∩ Coverage) / Area(Ripple)) × TimeWeight × FragmentationPenalty
  * 其中：
  * - Area(Ripple ∩ Coverage) = 涟漪区域与任务覆盖区域的交集面积。
  * - Area(Ripple) = 当前轮次涟漪区域的总面积。
  * - TimeWeight = 1 / (1 + 等待时间小时数)，等待时间越长，权重越低。
+ * - FragmentationPenalty = 1 / (1 + α × max(0, N_after - N_before))，
+ *   惩罚任务执行后涟漪区域碎片化（分裂成更多独立区域）的程度。
  * </p>
  * <p>
  * 与旧版的区别：

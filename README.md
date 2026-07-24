@@ -65,7 +65,7 @@
 │     ③ 网格空间查询    → 相交 Grid 列表                       │
 │     ④ 概率计算        → Grid.probability                    │
 │     ⑤ 访问任务生成    → List<AccessTask>                    │
-│     ⑥ 任务评分        → Score = P × Area × TimeWeight       │
+│     ⑥ 任务评分        → Score = ratio × TimeWeight × FragPenalty │
 │     ⑦ 选择最优任务    → max(Score)                          │
 │     ⑧ 更新状态        → historyTasks + currentTime          │
 │   }                                                         │
@@ -347,23 +347,94 @@ Step 2  几何转换      → 将涟漪结果转为 JTS Geometry（Polygon/Multi
 Step 3  网格查询      → 获取与 Ripple 区域相交的所有 Grid
 Step 4  概率计算      → probability = Area(Grid ∩ Ripple) / Area(Ripple)
 Step 5  访问生成      → AccessService 在时间窗口内生成卫星访问机会
-Step 6  任务评分      → Score = Probability × CoverageArea × TimeWeight
+Step 6  任务评分      → Score = ratio × TimeWeight × FragmentationPenalty
 Step 7  选择最优      → 选取 Score 最高的 AccessTask
 Step 8  终止判断      → 若最高 Score ≤ 0，结束规划
 Step 9  状态更新      → 更新 historyTasks 和 currentTime，进入下一轮
 ```
 
-### 评分公式
+### 评分公式（第二版）
 
 ```
-Score = Probability × EffectiveCoverageArea × TimeWeight
+Score = ratio × TimeWeight × FragmentationPenalty
+```
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     评分公式架构 (v2)                              │
+│                                                                  │
+│                        ┌─────────────────────┐                   │
+│                        │  ratio (交集占比)    │                   │
+│                        │  = intersectionArea  │                   │
+│                        │    / rippleArea      │                   │
+│                        │  替代: probability   │                   │
+│                        │  + coverageArea      │                   │
+│                        └──────────┬──────────┘                   │
+│                                   │                              │
+│           ┌───────────────────────┼───────────────────────┐      │
+│           │                       │                       │      │
+│           ▼                       ▼                       ▼      │
+│  ┌─────────────────┐   ┌──────────────────┐   ┌────────────────┐ │
+│  │  TimeWeight     │   │ Fragmentation    │   │  最终 Score    │ │
+│  │  = 1/(1+waitH)  │ × │ Penalty          │ = │  = ratio ×     │ │
+│  │  (同v1版,未变)  │   │ = 1/(1+α×ΔN)    │   │  timeWeight ×  │ │
+│  │                 │   │ α=0.5 (可调)     │   │  fragmentation │ │
+│  └─────────────────┘   └──────────────────┘   └────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 | 因子 | 计算方式 | 含义 |
 |------|----------|------|
-| Probability | AccessTask 覆盖 Grid 的概率均值 | 目标存在于覆盖区域的整体概率 |
-| EffectiveCoverageArea | `coverage.getArea()` | 访问任务的有效覆盖面积 |
-| TimeWeight | `1 / (1 + 等待秒数)` | 等待时间越长，权重越低 |
+| ratio | `Area(Ripple ∩ Coverage) / Area(Ripple)` | 任务覆盖涟漪热点区域的面积占比 |
+| TimeWeight | `1 / (1 + 等待小时数)` | 等待时间越长，权重越低 |
+| FragmentationPenalty | `1 / (1 + α × max(0, N_after - N_before))` | 惩罚任务执行后涟漪区域碎片化 |
+
+#### 与第一版的区别
+
+| 变更项 | v1 (旧) | v2 (新) |
+|--------|---------|---------|
+| 空间因子 | `Probability × CoverageArea` | `Area(Ripple ∩ Coverage) / Area(Ripple)` |
+| Probability | 取 grids 概率均值 | **删除**（不再依赖 Grid.probability） |
+| CoverageArea | `coverage.getArea()` | **删除**（改用交集面积占比） |
+| 碎片化惩罚 | 无 | 新增 `FragmentationPenalty` |
+| 语义 | "覆盖面积越大越好" | "覆盖涟漪热点越精准越好，且不切碎涟漪" |
+
+### 碎片化惩罚机制
+
+```
+JTS difference(rippleGeometry, coverage) 预估碎片化
+─────────────────────────────────────────────────────
+
+   Before: 1个涟漪区域           After: 1个区域 (未分裂)
+   ┌─────────────┐              ┌──────┐┌──────┐
+   │  ╭─────╮    │   difference │      ││      │
+   │  │Task │    │  ──────────▶ │      ││      │  penalty = 1.0 ✓
+   │  ╰─────╯    │              │      ││      │
+   └─────────────┘              └──────┘└──────┘
+
+   Before: 1个涟漪区域           After: 2个区域 (分裂!)
+   ┌─────────────┐              ┌──┐        ┌──┐
+   │      │      │   difference │  │        │  │
+   │  ────┼────  │  ──────────▶ │  │        │  │  penalty = 0.67 ✗
+   │      │      │              │  │        │  │  (多出1个区域)
+   └─────────────┘              └──┘        └──┘
+
+   Before: 2个涟漪区域 (已分裂)   After: 2个区域 (未增加)
+   ┌──┐        ┌──┐            ┌──┐        ┌──┐
+   │  │ ╭──╮   │  │ difference │  │ ╭──╮   │  │  penalty = 1.0 ✓
+   │  │ │  │   │  │ ──────────▶│  │ │  │   │  │  (区域数未增加)
+   └──┘ ╰──╯   └──┘            └──┘ ╰──╯   └──┘
+```
+
+| 场景 | N_before | N_after | penalty | 效果 |
+|------|----------|---------|---------|------|
+| 任务在涟漪内部，不切边界 | 1 | 1 | 1.0 | 不惩罚 |
+| 任务横跨涟漪瓶颈，切成两半 | 1 | 2 | 0.67 | 惩罚 |
+| 任务切成三块 | 1 | 3 | 0.5 | 重罚 |
+| 涟漪本身已分裂，任务未增加 | 2 | 2 | 1.0 | 不惩罚 |
+| 任务完全覆盖涟漪区域 | 1 | 0 | 1.0 | 不惩罚（搜索完成） |
+
+> **设计考量**：使用 JTS `difference` 运算进行预估，而非调用涟漪模型（避免 N 次 HTTP 请求）。`α` 常量在 `TaskScoreServiceImpl.FRAGMENTATION_ALPHA` 中可调，默认 0.5。
 
 ### 终止条件
 

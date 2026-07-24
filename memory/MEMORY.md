@@ -1,0 +1,1 @@
+- [task-scoring-v2-formula](task-scoring-v2-formula.md) — 第二版评分公式：交集面积占比 + 时间权重 + 碎片化惩罚
